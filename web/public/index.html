@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZZZ Footage</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+    ul { list-style: none; padding: 0; border: 1px solid #ccc; border-radius: 6px; }
+    li { padding: 0.5rem 0.75rem; cursor: pointer; border-bottom: 1px solid #eee; }
+    li:last-child { border-bottom: none; }
+    li:hover { background: #f3f3f3; }
+    li.selected { background: #2563eb; color: #fff; }
+    #actions { position: sticky; top: 0; background: #fff; padding: 0.75rem 0; border-bottom: 1px solid #ccc; margin-bottom: 1rem; }
+    #actions p { margin: 0.5rem 0 0; display: flex; gap: 0.5rem; }
+    button { padding: 0.5rem 1.25rem; font-size: 1rem; cursor: pointer; }
+    #status { margin-top: 0.5rem; color: #555; min-height: 1.2em; }
+    .error { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <h1>Footage</h1>
+  <div id="actions">
+    <div>Selected: <strong id="selected">none</strong></div>
+    <p>
+      <button data-action="preview" disabled>Preview</button>
+      <button data-action="trim" disabled>Trim</button>
+      <button data-action="skew" disabled>Skew</button>
+      <button data-action="crop" disabled>Crop</button>
+    </p>
+    <div id="status"></div>
+  </div>
+  <ul id="files"><li>Loading…</li></ul>
+
+  <script>
+    const list = document.getElementById('files');
+    const buttons = document.querySelectorAll('button[data-action]');
+    const selectedEl = document.getElementById('selected');
+    const statusEl = document.getElementById('status');
+    let selected = null;
+
+    function setStatus(msg, isError) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
+
+    async function loadFiles() {
+      const res = await fetch('/api/files');
+      const data = await res.json();
+      list.innerHTML = '';
+      if (!res.ok) {
+        setStatus(data.error, true);
+        return;
+      }
+      if (data.files.length === 0) {
+        list.innerHTML = '<li>No files found</li>';
+        return;
+      }
+      for (const name of data.files) {
+        const li = document.createElement('li');
+        li.textContent = name;
+        li.addEventListener('click', () => {
+          list.querySelectorAll('li.selected').forEach((el) => el.classList.remove('selected'));
+          li.classList.add('selected');
+          selected = name;
+          selectedEl.textContent = name;
+          buttons.forEach((b) => { b.disabled = false; });
+          setStatus('');
+        });
+        list.appendChild(li);
+      }
+    }
+
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!selected) return;
+        location.href = `/${btn.dataset.action}?file=${encodeURIComponent(selected)}`;
+      });
+    });
+
+    loadFiles().catch((err) => setStatus(err.message, true));
+  </script>
+</body>
+</html>

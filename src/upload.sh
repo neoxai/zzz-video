@@ -23,4 +23,9 @@ fi
 echo "PlatformIO version: $(pio --version)"
 echo "Venv ready."
 
-pio run --target upload --target monitor 2>&1 | tee upload.log
+set -o pipefail
+pio run --target upload 2>&1 | tee upload.log
+
+# PlatformIO >= 6.2 refuses to monitor when stdout is a pipe, so run it under
+# `script` to give it a real TTY while still appending to upload.log.
+script -q -a -c "pio device monitor" upload.log

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skew</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+    dt { font-weight: bold; }
+    dd { margin: 0; font-variant-numeric: tabular-nums; }
+    button { padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.75rem; }
+    #stage { position: relative; display: inline-block; margin-top: 1rem; user-select: none; touch-action: none; }
+    video { display: block; max-width: 100%; max-height: 60vh; background: #000; }
+    #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+    #poly { fill: none; stroke: red; stroke-width: 2; }
+    #poly.invalid { stroke-dasharray: 6 4; }
+    .handle { position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; background: red;
+              border: 2px solid #fff; box-sizing: border-box; border-radius: 50%; cursor: move; }
+    #scrubber { display: block; width: 100%; margin-top: 0.5rem; }
+    input[type="text"] { padding: 0.45rem; font-size: 1rem; min-width: 18rem; }
+    .error { color: #b91c1c; }
+    #status { margin-top: 0.75rem; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&larr; Back</a></p>
+  <h1 id="title">Skew</h1>
+  <dl>
+    <dt>Original</dt><dd id="original">…</dd>
+    <dt>Output</dt><dd id="outputSize">…</dd>
+    <dt>Corners</dt><dd id="corners">…</dd>
+  </dl>
+
+  <div class="row">
+    <button id="toggle">Play</button>
+    <button id="reset">Reset corners</button>
+  </div>
+
+  <div id="stage">
+    <video id="video" preload="auto" playsinline></video>
+    <svg id="overlay" preserveAspectRatio="none">
+      <polygon id="poly" vector-effect="non-scaling-stroke"></polygon>
+    </svg>
+    <div class="handle" data-corner="0" title="Top-left"></div>
+    <div class="handle" data-corner="1" title="Top-right"></div>
+    <div class="handle" data-corner="2" title="Bottom-left"></div>
+    <div class="handle" data-corner="3" title="Bottom-right"></div>
+  </div>
+  <input id="scrubber" type="range" min="0" max="0" step="any" value="0">
+
+  <div class="row">
+    <label for="output">New Filename:</label>
+    <input id="output" type="text" placeholder="skewed.mp4">
+    <button id="save" disabled>Save</button>
+  </div>
+  <div id="status"></div>
+
+  <script src="/skew-geometry.js"></script>
+  <script>
+    const file = new URLSearchParams(location.search).get('file');
+    const $ = (id) => document.getElementById(id);
+    const video = $('video');
+    const poly = $('poly');
+    const scrubber = $('scrubber');
+    const statusEl = $('status');
+    const NAMES = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+
+    // Video dimensions and corner points [x, y] in source-video pixels,
+    // ordered top-left, top-right, bottom-left, bottom-right
+    let vw = 0;
+    let vh = 0;
+    let points = [];
+    let saving = false;
+
+    function setStatus(msg, isError) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
+
+    // Pixels-on-screen per source pixel
+    function scale() {
+      return video.getBoundingClientRect().width / vw;
+    }
+
+    function isValid() {
+      return points.length === 4 && SkewGeometry.isConvex(points);
+    }
+
+    function render() {
+      if (!vw) return;
+      const s = scale();
+      // Drawn around the polygon: tl -> tr -> br -> bl
+      poly.setAttribute('points', [0, 1, 3, 2].map((i) => points[i].join(',')).join(' '));
+      poly.classList.toggle('invalid', !isValid());
+      document.querySelectorAll('.handle').forEach((el) => {
+        const [x, y] = points[el.dataset.corner];
+        el.style.left = `${x * s}px`;
+        el.style.top = `${y * s}px`;
+      });
+      $('corners').textContent = points.map((p, i) => `${NAMES[i]} (${p[0]}, ${p[1]})`).join(', ');
+      if (isValid()) {
+        const { width, height } = SkewGeometry.outputSize(points, vw, vh);
+        $('outputSize').textContent = `${width} x ${height} px`;
+        if (statusEl.dataset.geometry) setStatus('');
+        delete statusEl.dataset.geometry;
+      } else {
+        $('outputSize').textContent = '—';
+        setStatus('Edges cross or the shape is not convex: move a corner to fix it', true);
+        statusEl.dataset.geometry = '1';
+      }
+      updateSaveState();
+    }
+
+    function resetCorners() {
+      points = [[0, 0], [vw, 0], [0, vh], [vw, vh]];
+      render();
+    }
+
+    function updateSaveState() {
+      $('save').disabled = saving || !vw || !isValid() || !$('output').value.trim();
+    }
+
+    // Each corner moves independently
+    document.querySelectorAll('.handle').forEach((handle) => {
+      handle.addEventListener('pointerdown', (e) => {
+        if (!vw) return;
+        e.preventDefault();
+        handle.setPointerCapture(e.pointerId);
+        const i = Number(handle.dataset.corner);
+
+        const onMove = (ev) => {
+          const box = video.getBoundingClientRect();
+          const s = scale();
+          points[i] = [
+            Math.round(Math.min(vw, Math.max(0, (ev.clientX - box.left) / s))),
+            Math.round(Math.min(vh, Math.max(0, (ev.clientY - box.top) / s))),
+          ];
+          render();
+        };
+        const onUp = () => {
+          handle.removeEventListener('pointermove', onMove);
+          handle.removeEventListener('pointerup', onUp);
+          handle.removeEventListener('pointercancel', onUp);
+        };
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+        handle.addEventListener('pointercancel', onUp);
+      });
+    });
+
+    async function loadInfo() {
+      const res = await fetch(`/api/probe?file=${encodeURIComponent(file)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      vw = data.width;
+      vh = data.height;
+      $('overlay').setAttribute('viewBox', `0 0 ${vw} ${vh}`);
+      $('original').textContent = `${vw} x ${vh} px`;
+      scrubber.max = data.duration || 0;
+      resetCorners();
+    }
+
+    $('toggle').addEventListener('click', () => {
+      if (video.paused) video.play();
+      else video.pause();
+    });
+    video.addEventListener('play', () => { $('toggle').textContent = 'Pause'; });
+    video.addEventListener('pause', () => { $('toggle').textContent = 'Play'; });
+    video.addEventListener('timeupdate', () => { scrubber.value = video.currentTime; });
+    scrubber.addEventListener('input', () => { video.currentTime = Number(scrubber.value); });
+
+    // Keep the handles aligned when the video's on-screen size changes
+    video.addEventListener('loadedmetadata', render);
+    new ResizeObserver(render).observe(video);
+
+    $('reset').addEventListener('click', resetCorners);
+    $('output').addEventListener('input', updateSaveState);
+
+    $('save').addEventListener('click', async () => {
+      saving = true;
+      updateSaveState();
+      setStatus('Saving… (re-encoding, this can take a while)');
+      try {
+        const res = await fetch('/api/skew', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file, output: $('output').value, points }),
+        });
+        const data = await res.json();
+        setStatus(res.ok ? data.message : data.error, !res.ok);
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        saving = false;
+        updateSaveState();
+      }
+    });
+
+    if (!file) {
+      setStatus('No file specified', true);
+      document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    } else {
+      document.title = `Skew – ${file}`;
+      $('title').textContent = `Skew: ${file}`;
+      video.src = `/video/${encodeURIComponent(file)}`;
+      loadInfo().catch((err) => setStatus(err.message, true));
+    }
+  </script>
+</body>
+</html>

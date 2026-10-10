@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trim</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+    dt { font-weight: bold; }
+    dd { margin: 0; }
+    button { padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.75rem; }
+    video { display: block; max-width: 100%; max-height: 60vh; margin-top: 1rem; background: #000; }
+    #scrubber { width: 100%; margin-top: 0.5rem; }
+    #current { font-variant-numeric: tabular-nums; }
+    input[type="text"] { padding: 0.45rem; font-size: 1rem; min-width: 18rem; }
+    .error { color: #b91c1c; }
+    #status { margin-top: 0.75rem; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&larr; Back</a></p>
+  <h1 id="title">Trim</h1>
+  <dl>
+    <dt>Horizontal</dt><dd id="width">…</dd>
+    <dt>Vertical</dt><dd id="height">…</dd>
+    <dt>Duration</dt><dd id="duration">…</dd>
+    <dt>Frame rate</dt><dd id="fps">…</dd>
+  </dl>
+
+  <div class="row">
+    <button id="toggle">Play</button>
+    <button id="frameBack">Frame -</button>
+    <button id="frameFwd">Frame +</button>
+    <span id="current"></span>
+  </div>
+
+  <video id="video" preload="auto" playsinline></video>
+  <input id="scrubber" type="range" min="0" max="0" step="1" value="0">
+
+  <div class="row">
+    <button id="setStart">Set StartTime</button>
+    <span>Start: <strong id="startLabel">not set</strong></span>
+  </div>
+  <div class="row">
+    <button id="setEnd">Set EndTime</button>
+    <span>End: <strong id="endLabel">not set</strong></span>
+  </div>
+  <div class="row">
+    <label for="output">New Filename:</label>
+    <input id="output" type="text" placeholder="clip.mp4">
+    <button id="save" disabled>Save</button>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    const file = new URLSearchParams(location.search).get('file');
+    const $ = (id) => document.getElementById(id);
+    const video = $('video');
+    const scrubber = $('scrubber');
+    const statusEl = $('status');
+
+    let fps = 0;
+    let lastFrame = 0;
+    let startFrame = null;
+    let endFrame = null;
+    let scrubbing = false;
+    let saving = false;
+
+    function setStatus(msg, isError) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
+
+    function formatTime(seconds) {
+      if (!Number.isFinite(seconds)) return 'unknown';
+      const m = Math.floor(seconds / 60);
+      const s = (seconds % 60).toFixed(3).padStart(6, '0');
+      return `${m}:${s}`;
+    }
+
+    function frameLabel(frame) {
+      return `${formatTime(frame / fps)} (frame ${frame})`;
+    }
+
+    function currentFrame() {
+      return Math.min(lastFrame, Math.max(0, Math.floor(video.currentTime * fps + 1e-6)));
+    }
+
+    // Seek to the middle of a frame so the browser reliably shows that frame
+    function seekToFrame(frame) {
+      frame = Math.min(lastFrame, Math.max(0, frame));
+      video.currentTime = (frame + 0.5) / fps;
+      updatePosition(frame);
+    }
+
+    function updatePosition(frame = currentFrame()) {
+      $('current').textContent = fps ? frameLabel(frame) : '';
+      if (!scrubbing) scrubber.value = frame;
+    }
+
+    function updateSaveState() {
+      $('startLabel').textContent = startFrame === null ? 'not set' : frameLabel(startFrame);
+      $('endLabel').textContent = endFrame === null ? 'not set' : frameLabel(endFrame);
+      const rangeOk = startFrame !== null && endFrame !== null && endFrame >= startFrame;
+      $('save').disabled = saving || !rangeOk || !$('output').value.trim();
+      if (startFrame !== null && endFrame !== null && endFrame < startFrame) {
+        setStatus('End must be at or after Start', true);
+      } else if (!saving && statusEl.className === 'error' && statusEl.textContent.startsWith('End must')) {
+        setStatus('');
+      }
+    }
+
+    async function loadInfo() {
+      const res = await fetch(`/api/probe?file=${encodeURIComponent(file)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      fps = data.fps;
+      lastFrame = Math.max(0, data.frames - 1);
+      $('width').textContent = `${data.width} px`;
+      $('height').textContent = `${data.height} px`;
+      $('duration').textContent = `${formatTime(data.duration)} (${data.frames} frames)`;
+      $('fps').textContent = `${+fps.toFixed(3)} fps`;
+      scrubber.max = lastFrame;
+      updatePosition();
+    }
+
+    $('toggle').addEventListener('click', () => {
+      if (video.paused) video.play();
+      else video.pause();
+    });
+    video.addEventListener('play', () => { $('toggle').textContent = 'Pause'; });
+    video.addEventListener('pause', () => { $('toggle').textContent = 'Play'; });
+    video.addEventListener('timeupdate', () => updatePosition());
+    video.addEventListener('seeked', () => updatePosition());
+
+    function step(delta) {
+      if (!fps) return;
+      video.pause();
+      seekToFrame(currentFrame() + delta);
+    }
+    $('frameBack').addEventListener('click', () => step(-1));
+    $('frameFwd').addEventListener('click', () => step(1));
+
+    scrubber.addEventListener('input', () => {
+      scrubbing = true;
+      if (fps) seekToFrame(Number(scrubber.value));
+    });
+    scrubber.addEventListener('change', () => { scrubbing = false; });
+
+    $('setStart').addEventListener('click', () => {
+      if (!fps) return;
+      startFrame = currentFrame();
+      updateSaveState();
+    });
+    $('setEnd').addEventListener('click', () => {
+      if (!fps) return;
+      endFrame = currentFrame();
+      updateSaveState();
+    });
+    $('output').addEventListener('input', updateSaveState);
+
+    $('save').addEventListener('click', async () => {
+      saving = true;
+      updateSaveState();
+      setStatus('Saving… (re-encoding, this can take a while)');
+      try {
+        const res = await fetch('/api/trim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file, startFrame, endFrame, output: $('output').value }),
+        });
+        const data = await res.json();
+        setStatus(res.ok ? data.message : data.error, !res.ok);
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        saving = false;
+        updateSaveState();
+      }
+    });
+
+    if (!file) {
+      setStatus('No file specified', true);
+      document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    } else {
+      document.title = `Trim – ${file}`;
+      $('title').textContent = `Trim: ${file}`;
+      video.src = `/video/${encodeURIComponent(file)}`;
+      loadInfo().catch((err) => setStatus(err.message, true));
+    }
+  </script>
+</body>
+</html>

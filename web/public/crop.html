@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crop</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+    dt { font-weight: bold; }
+    dd { margin: 0; font-variant-numeric: tabular-nums; }
+    button { padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.75rem; }
+    #stage { position: relative; display: inline-block; margin-top: 1rem; user-select: none; touch-action: none; }
+    video { display: block; max-width: 100%; max-height: 60vh; background: #000; }
+    #rect { position: absolute; border: 2px solid red; box-sizing: border-box; pointer-events: none; }
+    .handle { position: absolute; width: 16px; height: 16px; margin: -8px 0 0 -8px; background: red;
+              border: 2px solid #fff; box-sizing: border-box; border-radius: 2px; }
+    .handle[data-corner="tl"], .handle[data-corner="br"] { cursor: nwse-resize; }
+    .handle[data-corner="tr"], .handle[data-corner="bl"] { cursor: nesw-resize; }
+    #scrubber { display: block; width: 100%; margin-top: 0.5rem; }
+    input[type="text"] { padding: 0.45rem; font-size: 1rem; min-width: 18rem; }
+    .error { color: #b91c1c; }
+    #status { margin-top: 0.75rem; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&larr; Back</a></p>
+  <h1 id="title">Crop</h1>
+  <dl>
+    <dt>Original</dt><dd id="original">…</dd>
+    <dt>Cropped</dt><dd id="cropped">…</dd>
+    <dt>Trimmed</dt><dd id="margins">…</dd>
+  </dl>
+
+  <div class="row">
+    <button id="toggle">Play</button>
+    <button id="reset">Reset crop</button>
+  </div>
+
+  <div id="stage">
+    <video id="video" preload="auto" playsinline></video>
+    <div id="rect"></div>
+    <div class="handle" data-corner="tl"></div>
+    <div class="handle" data-corner="tr"></div>
+    <div class="handle" data-corner="bl"></div>
+    <div class="handle" data-corner="br"></div>
+  </div>
+  <input id="scrubber" type="range" min="0" max="0" step="any" value="0">
+
+  <div class="row">
+    <label for="output">New Filename:</label>
+    <input id="output" type="text" placeholder="cropped.mp4">
+    <button id="save" disabled>Save</button>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    const file = new URLSearchParams(location.search).get('file');
+    const $ = (id) => document.getElementById(id);
+    const video = $('video');
+    const stage = $('stage');
+    const rectEl = $('rect');
+    const scrubber = $('scrubber');
+    const statusEl = $('status');
+    const MIN_SIZE = 16;
+
+    // Video dimensions and crop edges, all in source-video pixels
+    let vw = 0;
+    let vh = 0;
+    const crop = { left: 0, top: 0, right: 0, bottom: 0 };
+    let saving = false;
+
+    function setStatus(msg, isError) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
+
+    function formatTime(seconds) {
+      if (!Number.isFinite(seconds)) return 'unknown';
+      const m = Math.floor(seconds / 60);
+      const s = (seconds % 60).toFixed(2).padStart(5, '0');
+      return `${m}:${s}`;
+    }
+
+    // Pixels-on-screen per source pixel
+    function scale() {
+      return video.getBoundingClientRect().width / vw;
+    }
+
+    // H.264 4:2:0 needs even offsets and sizes
+    const even = (n) => Math.round(n / 2) * 2;
+    const maxRight = () => vw - (vw % 2);
+    const maxBottom = () => vh - (vh % 2);
+
+    function render() {
+      if (!vw) return;
+      const s = scale();
+      const w = crop.right - crop.left;
+      const h = crop.bottom - crop.top;
+      Object.assign(rectEl.style, {
+        left: `${crop.left * s}px`,
+        top: `${crop.top * s}px`,
+        width: `${w * s}px`,
+        height: `${h * s}px`,
+      });
+      const pos = {
+        tl: [crop.left, crop.top],
+        tr: [crop.right, crop.top],
+        bl: [crop.left, crop.bottom],
+        br: [crop.right, crop.bottom],
+      };
+      document.querySelectorAll('.handle').forEach((el) => {
+        const [x, y] = pos[el.dataset.corner];
+        el.style.left = `${x * s}px`;
+        el.style.top = `${y * s}px`;
+      });
+      $('cropped').textContent = `${w} x ${h} px (offset ${crop.left}, ${crop.top})`;
+      $('margins').textContent =
+        `top ${crop.top}, bottom ${vh - crop.bottom}, left ${crop.left}, right ${vw - crop.right} px`;
+      updateSaveState();
+    }
+
+    function resetCrop() {
+      crop.left = 0;
+      crop.top = 0;
+      crop.right = maxRight();
+      crop.bottom = maxBottom();
+      render();
+    }
+
+    function updateSaveState() {
+      $('save').disabled = saving || !vw || !$('output').value.trim();
+    }
+
+    // Dragging a corner moves its two adjacent edges; the rectangle stays
+    // axis-aligned.
+    document.querySelectorAll('.handle').forEach((handle) => {
+      handle.addEventListener('pointerdown', (e) => {
+        if (!vw) return;
+        e.preventDefault();
+        handle.setPointerCapture(e.pointerId);
+        const corner = handle.dataset.corner;
+
+        const onMove = (ev) => {
+          const box = video.getBoundingClientRect();
+          const s = scale();
+          const x = even(Math.min(vw, Math.max(0, (ev.clientX - box.left) / s)));
+          const y = even(Math.min(vh, Math.max(0, (ev.clientY - box.top) / s)));
+          if (corner.includes('l')) crop.left = Math.min(x, crop.right - MIN_SIZE);
+          if (corner.includes('r')) crop.right = Math.max(x, crop.left + MIN_SIZE);
+          if (corner.includes('t')) crop.top = Math.min(y, crop.bottom - MIN_SIZE);
+          if (corner.includes('b')) crop.bottom = Math.max(y, crop.top + MIN_SIZE);
+          crop.right = Math.min(crop.right, maxRight());
+          crop.bottom = Math.min(crop.bottom, maxBottom());
+          render();
+        };
+        const onUp = () => {
+          handle.removeEventListener('pointermove', onMove);
+          handle.removeEventListener('pointerup', onUp);
+          handle.removeEventListener('pointercancel', onUp);
+        };
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+        handle.addEventListener('pointercancel', onUp);
+      });
+    });
+
+    async function loadInfo() {
+      const res = await fetch(`/api/probe?file=${encodeURIComponent(file)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      vw = data.width;
+      vh = data.height;
+      $('original').textContent = `${vw} x ${vh} px`;
+      scrubber.max = data.duration || 0;
+      resetCrop();
+    }
+
+    $('toggle').addEventListener('click', () => {
+      if (video.paused) video.play();
+      else video.pause();
+    });
+    video.addEventListener('play', () => { $('toggle').textContent = 'Pause'; });
+    video.addEventListener('pause', () => { $('toggle').textContent = 'Play'; });
+    video.addEventListener('timeupdate', () => { scrubber.value = video.currentTime; });
+    scrubber.addEventListener('input', () => { video.currentTime = Number(scrubber.value); });
+
+    // Keep the overlay aligned when the video's on-screen size changes
+    video.addEventListener('loadedmetadata', render);
+    new ResizeObserver(render).observe(video);
+
+    $('reset').addEventListener('click', resetCrop);
+    $('output').addEventListener('input', updateSaveState);
+
+    $('save').addEventListener('click', async () => {
+      saving = true;
+      updateSaveState();
+      setStatus('Saving… (re-encoding, this can take a while)');
+      try {
+        const res = await fetch('/api/crop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file,
+            output: $('output').value,
+            x: crop.left,
+            y: crop.top,
+            width: crop.right - crop.left,
+            height: crop.bottom - crop.top,
+          }),
+        });
+        const data = await res.json();
+        setStatus(res.ok ? data.message : data.error, !res.ok);
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        saving = false;
+        updateSaveState();
+      }
+    });
+
+    if (!file) {
+      setStatus('No file specified', true);
+      document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    } else {
+      document.title = `Crop – ${file}`;
+      $('title').textContent = `Crop: ${file}`;
+      video.src = `/video/${encodeURIComponent(file)}`;
+      loadInfo().catch((err) => setStatus(err.message, true));
+    }
+  </script>
+</body>
+</html>

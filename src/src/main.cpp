@@ -11,7 +11,13 @@
 
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-Arduino_CO5300 *gfx = AMOLED_PANEL(bus, LCD_WIDTH, LCD_HEIGHT);
+Arduino_CO5300 *panel = AMOLED_PANEL(bus, LCD_WIDTH, LCD_HEIGHT);
+
+// The panel can only mirror, not swap rows/columns, so rotation is done in
+// software: draw into a PSRAM framebuffer canvas and flush it to the panel.
+// 0 = portrait, 1 = 90° clockwise, 2 = 180°, 3 = 270°.
+#define DISPLAY_ROTATION 3
+Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel, 0, 0, DISPLAY_ROTATION);
 
 static bool tca9554Write(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(TCA9554_ADDR);
@@ -44,7 +50,7 @@ void setup() {
     Serial.println("gfx->begin() failed");
     return;
   }
-  gfx->setBrightness(200);
+  panel->setBrightness(200);
   gfx->fillScreen(BLACK);
 
   const char *msg = "Hello World";
@@ -53,8 +59,9 @@ void setup() {
   int16_t x1, y1;
   uint16_t w, h;
   gfx->getTextBounds(msg, 0, 0, &x1, &y1, &w, &h);
-  gfx->setCursor((LCD_WIDTH - w) / 2, (LCD_HEIGHT - h) / 2);
-  gfx->println(msg);
+  gfx->setCursor((gfx->width() - w) / 2, (gfx->height() - h) / 2);
+  gfx->print(msg);
+  gfx->flush();
 
   Serial.println("zzz-video: hello world drawn");
 }

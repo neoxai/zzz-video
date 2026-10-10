@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preview</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+    dt { font-weight: bold; }
+    dd { margin: 0; }
+    button { padding: 0.5rem 1.25rem; font-size: 1rem; cursor: pointer; min-width: 6rem; }
+    video { display: block; max-width: 100%; max-height: 70vh; margin-top: 1rem; background: #000; }
+    .error { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&larr; Back</a></p>
+  <h1 id="title">Preview</h1>
+  <dl>
+    <dt>Horizontal</dt><dd id="width">…</dd>
+    <dt>Vertical</dt><dd id="height">…</dd>
+    <dt>Duration</dt><dd id="duration">…</dd>
+  </dl>
+  <div id="error" class="error"></div>
+  <button id="toggle">Play</button>
+  <video id="video" preload="metadata" playsinline></video>
+
+  <script>
+    const file = new URLSearchParams(location.search).get('file');
+    const video = document.getElementById('video');
+    const toggle = document.getElementById('toggle');
+    const errorEl = document.getElementById('error');
+
+    function formatDuration(seconds) {
+      if (!Number.isFinite(seconds)) return 'unknown';
+      const m = Math.floor(seconds / 60);
+      const s = (seconds % 60).toFixed(2).padStart(5, '0');
+      return `${m}:${s} (${seconds.toFixed(2)}s)`;
+    }
+
+    async function loadInfo() {
+      const res = await fetch(`/api/probe?file=${encodeURIComponent(file)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      document.getElementById('width').textContent = `${data.width} px`;
+      document.getElementById('height').textContent = `${data.height} px`;
+      document.getElementById('duration').textContent = formatDuration(data.duration);
+    }
+
+    toggle.addEventListener('click', () => {
+      if (video.paused) video.play();
+      else video.pause();
+    });
+    video.addEventListener('play', () => { toggle.textContent = 'Pause'; });
+    video.addEventListener('pause', () => { toggle.textContent = 'Play'; });
+
+    if (!file) {
+      errorEl.textContent = 'No file specified';
+      toggle.disabled = true;
+    } else {
+      document.title = `Preview – ${file}`;
+      document.getElementById('title').textContent = file;
+      video.src = `/video/${encodeURIComponent(file)}`;
+      loadInfo().catch((err) => { errorEl.textContent = err.message; });
+    }
+  </script>
+</body>
+</html>
