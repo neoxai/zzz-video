@@ -29,8 +29,11 @@ ffmpeg -ss 1 -i cropped.mp4 -frames:v 1 frame.png -y
 #bottom-left  (x2,y2)
 #bottom-right (x3,y3)
 ffmpeg -i cropped.mp4 \
--vf "perspective=x0=43:y0=17:x1=325:y1=4:x2=16:y2=271:x3=327:y3=271:sense=0" \
+-vf "perspective=x0=43:y0=17:x1=325:y1=4:x2=21:y2=257:x3=327:y3=271:sense=0" \
 undistorted.mp4 -y
 
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 undistorted.mp4
 #360x300
+
+ffmpeg -i undistorted.mp4 -vf "scale=240:280:flags=lanczos" scaled_240_280.mp4 -y
+ffmpeg -i undistorted.mp4 -vf "fps=12,scale=240:280:flags=lanczos,format=rgb565le" frame_%03d.png
