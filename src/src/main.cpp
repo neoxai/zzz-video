@@ -25,6 +25,8 @@ Arduino_CO5300 *panel = AMOLED_PANEL(bus, LCD_WIDTH, LCD_HEIGHT);
 // 0 = portrait, 1 = 90° clockwise, 2 = 180°, 3 = 270°.
 #define DISPLAY_ROTATION 3
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel, 0, 0, DISPLAY_ROTATION);
+// Second framebuffer so video can decode one frame while flushing the other
+Arduino_Canvas *backBuffer = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel, 0, 0, DISPLAY_ROTATION);
 
 static bool tca9554Write(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(TCA9554_ADDR);
@@ -53,8 +55,8 @@ void setup() {
     Serial.println("TCA9554 not responding at 0x20");
   }
 
-  if (!gfx->begin()) {
-    Serial.println("gfx->begin() failed");
+  if (!gfx->begin() || !backBuffer->begin(GFX_SKIP_OUTPUT_BEGIN)) {
+    Serial.println("display/framebuffer init failed");
     return;
   }
   panel->setBrightness(200);
@@ -65,7 +67,8 @@ void setup() {
     Serial.println("LittleFS mount failed — run ./upload.sh to flash data/");
     return;
   }
-  playMjpeg(STARTUP_VIDEO, gfx, STARTUP_VIDEO_FPS, true /* loop */);
+  Arduino_Canvas *buffers[2] = {gfx, backBuffer};
+  playMjpeg(STARTUP_VIDEO, buffers, STARTUP_VIDEO_FPS, true /* loop */);
 }
 
 void loop() {

@@ -2,9 +2,31 @@
 
 #include <JPEGDEC.h>
 #include <LittleFS.h>
+#include <vector>
+
+#define FRAME_END 0xFF  // slot value telling the flusher playback is over
 
 static JPEGDEC jpeg;
-static Arduino_Canvas *target;
+static Arduino_Canvas *target;  // canvas the decoder is drawing into
+
+struct Frame {
+  const uint8_t *data;
+  size_t len;
+};
+
+struct Ready {
+  uint8_t slot;       // canvas index, or FRAME_END
+  uint32_t index;     // frame number within the file
+  uint32_t decodeUs;
+};
+
+struct Player {
+  std::vector<Frame> frames;
+  Arduino_Canvas **buffers;
+  bool loop;
+  QueueHandle_t freeSlots;   // canvases the decoder may draw into
+  QueueHandle_t readySlots;  // decoded canvases waiting to be flushed
+};
 
 static int drawBlock(JPEGDRAW *draw) {
   target->draw16bitRGBBitmap(draw->x, draw->y, draw->pPixels, draw->iWidth, draw->iHeight);
@@ -27,19 +49,52 @@ static uint8_t *loadFile(const char *path, size_t *size) {
 
 // Every frame starts with a JPEG SOI marker (FF D8 FF). FF bytes inside
 // entropy-coded data are always stuffed (FF 00), so this can't false-match.
-static size_t nextFrameStart(const uint8_t *buf, size_t size, size_t from) {
-  for (size_t i = from; i + 2 < size; i++) {
-    if (buf[i] == 0xFF && buf[i + 1] == 0xD8 && buf[i + 2] == 0xFF) return i;
+static std::vector<Frame> splitFrames(const uint8_t *buf, size_t size) {
+  std::vector<Frame> frames;
+  size_t start = size;
+  for (size_t i = 0; i + 2 < size; i++) {
+    if (buf[i] == 0xFF && buf[i + 1] == 0xD8 && buf[i + 2] == 0xFF) {
+      if (start < size) frames.push_back({buf + start, i - start});
+      start = i;
+    }
   }
-  return size;
+  if (start < size) frames.push_back({buf + start, size - start});
+  return frames;
 }
 
-static void logPass(uint32_t frames, uint32_t elapsed) {
-  Serial.printf("video: %u frames in %u ms (%.1f fps)\n", frames, elapsed,
-                elapsed ? frames * 1000.0f / elapsed : 0.0f);
+static void decodeTask(void *arg) {
+  Player *p = (Player *)arg;
+  uint32_t index = 0;
+  for (;;) {
+    Ready r = {0, index, 0};
+    xQueueReceive(p->freeSlots, &r.slot, portMAX_DELAY);
+
+    uint32_t t = micros();
+    const Frame &f = p->frames[index];
+    target = p->buffers[r.slot];
+    if (jpeg.openRAM((uint8_t *)f.data, f.len, drawBlock)) {
+      jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+      int x = (target->width() - jpeg.getWidth()) / 2;
+      int y = (target->height() - jpeg.getHeight()) / 2;
+      jpeg.decode(x, y, 0);
+      jpeg.close();
+    }
+    r.decodeUs = micros() - t;
+    xQueueSend(p->readySlots, &r, portMAX_DELAY);
+    // If decoding is the bottleneck this loop never blocks; yield a tick so
+    // core 0's idle task runs and the task watchdog stays fed.
+    vTaskDelay(1);
+
+    if (++index < p->frames.size()) continue;
+    if (!p->loop) break;
+    index = 0;
+  }
+  Ready end = {FRAME_END, 0, 0};
+  xQueueSend(p->readySlots, &end, portMAX_DELAY);
+  vTaskDelete(nullptr);
 }
 
-bool playMjpeg(const char *path, Arduino_Canvas *canvas, uint8_t fps, bool loop) {
+bool playMjpeg(const char *path, Arduino_Canvas *buffers[2], uint8_t fps, bool loop) {
   size_t size;
   uint8_t *buf = loadFile(path, &size);
   if (!buf) {
@@ -47,42 +102,57 @@ bool playMjpeg(const char *path, Arduino_Canvas *canvas, uint8_t fps, bool loop)
     return false;
   }
 
-  target = canvas;
-  const uint32_t frameMs = 1000 / fps;
-  uint32_t frames = 0;
-  uint32_t started = millis();
-  uint32_t nextDue = started;
+  Player p;
+  p.frames = splitFrames(buf, size);
+  p.buffers = buffers;
+  p.loop = loop;
+  if (p.frames.empty()) {
+    Serial.printf("video: no frames in %s\n", path);
+    free(buf);
+    return false;
+  }
+  p.freeSlots = xQueueCreate(2, sizeof(uint8_t));
+  p.readySlots = xQueueCreate(2, sizeof(Ready));
+  for (uint8_t slot = 0; slot < 2; slot++) xQueueSend(p.freeSlots, &slot, 0);
+  xTaskCreatePinnedToCore(decodeTask, "mjpeg", 8192, &p, 1, nullptr, 0);
 
-  const size_t first = nextFrameStart(buf, size, 0);
-  size_t start = first;
-  while (start < size) {
-    size_t end = nextFrameStart(buf, size, start + 3);
+  const uint32_t frameUs = 1000000 / fps;
+  uint32_t nextDue = micros();
+  uint32_t passStart = millis(), decodeUs = 0, flushUs = 0, shown = 0;
 
-    if (jpeg.openRAM(buf + start, end - start, drawBlock)) {
-      jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-      int x = (canvas->width() - jpeg.getWidth()) / 2;
-      int y = (canvas->height() - jpeg.getHeight()) / 2;
-      jpeg.decode(x, y, 0);
-      jpeg.close();
-      canvas->flush();
-      frames++;
+  for (;;) {
+    Ready r;
+    xQueueReceive(p.readySlots, &r, portMAX_DELAY);
+    if (r.slot == FRAME_END) break;
+
+    // Show frames on a steady clock. If we've fallen more than a frame
+    // behind, resync rather than bursting to catch up (that reads as jitter).
+    int32_t wait = (int32_t)(nextDue - micros());
+    if (wait > 0) {
+      delay(wait / 1000);
+      delayMicroseconds(wait % 1000);
+    } else if (-wait > (int32_t)frameUs) nextDue = micros();
+    nextDue += frameUs;
+
+    uint32_t t = micros();
+    buffers[r.slot]->flush();
+    flushUs += micros() - t;
+    decodeUs += r.decodeUs;
+    shown++;
+    xQueueSend(p.freeSlots, &r.slot, portMAX_DELAY);
+
+    if (r.index == p.frames.size() - 1) {
+      uint32_t elapsed = millis() - passStart;
+      Serial.printf("video: %u frames in %u ms (%.1f fps) | avg decode %.1f ms, flush %.1f ms\n",
+                    shown, elapsed, elapsed ? shown * 1000.0f / elapsed : 0.0f,
+                    decodeUs / 1000.0f / shown, flushUs / 1000.0f / shown);
+      passStart = millis();
+      decodeUs = flushUs = shown = 0;
     }
-
-    nextDue += frameMs;
-    int32_t wait = (int32_t)(nextDue - millis());
-    if (wait > 0) delay(wait);
-    start = end;
-
-    if (start < size) continue;  // more frames in this pass
-    // End of pass. frames == 0 means nothing decoded — don't spin forever.
-    if (!loop || frames == 0) break;
-    logPass(frames, millis() - started);
-    frames = 0;
-    started = millis();
-    start = first;
   }
 
-  logPass(frames, millis() - started);
+  vQueueDelete(p.freeSlots);
+  vQueueDelete(p.readySlots);
   free(buf);
   return true;
 }
