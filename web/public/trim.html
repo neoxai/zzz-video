@@ -48,6 +48,9 @@
     <span>End: <strong id="endLabel">not set</strong></span>
   </div>
   <div class="row">
+    <button id="loop" disabled>Preview Trimmed Loop</button>
+  </div>
+  <div class="row">
     <label for="output">New Filename:</label>
     <input id="output" type="text" placeholder="clip.mp4">
     <button id="save" disabled>Save</button>
@@ -67,6 +70,8 @@
     let endFrame = null;
     let scrubbing = false;
     let saving = false;
+    let looping = false;
+    let loopId = 0;
 
     function setStatus(msg, isError) {
       statusEl.textContent = msg;
@@ -105,6 +110,8 @@
       $('endLabel').textContent = endFrame === null ? 'not set' : frameLabel(endFrame);
       const rangeOk = startFrame !== null && endFrame !== null && endFrame >= startFrame;
       $('save').disabled = saving || !rangeOk || !$('output').value.trim();
+      $('loop').disabled = !fps || !rangeOk;
+      $('loop').textContent = looping ? 'Pause Trimmed Loop' : 'Preview Trimmed Loop';
       if (startFrame !== null && endFrame !== null && endFrame < startFrame) {
         setStatus('End must be at or after Start', true);
       } else if (!saving && statusEl.className === 'error' && statusEl.textContent.startsWith('End must')) {
@@ -126,17 +133,80 @@
       updatePosition();
     }
 
+    // Trimmed loop: play startFrame..endFrame (inclusive) over and over
+    function startLoop() {
+      looping = true;
+      const id = ++loopId;
+      seekToFrame(startFrame);
+      video.play();
+      updateSaveState();
+
+      const restart = () => {
+        if (looping && id === loopId) {
+          seekToFrame(startFrame);
+          video.play();
+        }
+      };
+      if ('requestVideoFrameCallback' in video) {
+        // Called as each frame is presented. Once the end frame is on screen,
+        // pause so playback can't advance past it, hold it for one frame's
+        // duration, then jump back to the start.
+        const onFrame = (now, meta) => {
+          if (!looping || id !== loopId) return;
+          const frame = Math.round(meta.mediaTime * fps);
+          if (frame > endFrame) {
+            restart();
+          } else if (frame === endFrame) {
+            video.pause();
+            setTimeout(restart, 1000 / fps);
+          }
+          video.requestVideoFrameCallback(onFrame);
+        };
+        video.requestVideoFrameCallback(onFrame);
+      } else {
+        const onTime = () => {
+          if (!looping || id !== loopId) return video.removeEventListener('timeupdate', onTime);
+          if (currentFrame() > endFrame) restart();
+        };
+        video.addEventListener('timeupdate', onTime);
+      }
+    }
+
+    // Returns true if a loop was playing
+    function stopLoop() {
+      if (!looping) return false;
+      looping = false;
+      loopId++;
+      video.pause();
+      updateSaveState();
+      return true;
+    }
+
+    $('loop').addEventListener('click', () => {
+      if (!stopLoop()) startLoop();
+    });
+    // End frame is the last frame of the file: playback ends instead
+    video.addEventListener('ended', () => {
+      if (looping) {
+        seekToFrame(startFrame);
+        video.play();
+      }
+    });
+
     $('toggle').addEventListener('click', () => {
+      if (stopLoop()) return;
       if (video.paused) video.play();
       else video.pause();
     });
     video.addEventListener('play', () => { $('toggle').textContent = 'Pause'; });
-    video.addEventListener('pause', () => { $('toggle').textContent = 'Play'; });
+    // The loop briefly pauses on its end frame; don't flicker the label
+    video.addEventListener('pause', () => { $('toggle').textContent = looping ? 'Pause' : 'Play'; });
     video.addEventListener('timeupdate', () => updatePosition());
     video.addEventListener('seeked', () => updatePosition());
 
     function step(delta) {
       if (!fps) return;
+      stopLoop();
       video.pause();
       seekToFrame(currentFrame() + delta);
     }
@@ -144,6 +214,7 @@
     $('frameFwd').addEventListener('click', () => step(1));
 
     scrubber.addEventListener('input', () => {
+      stopLoop();
       scrubbing = true;
       if (fps) seekToFrame(Number(scrubber.value));
     });
@@ -151,17 +222,20 @@
 
     $('setStart').addEventListener('click', () => {
       if (!fps) return;
+      stopLoop();
       startFrame = currentFrame();
       updateSaveState();
     });
     $('setEnd').addEventListener('click', () => {
       if (!fps) return;
+      stopLoop();
       endFrame = currentFrame();
       updateSaveState();
     });
     $('output').addEventListener('input', updateSaveState);
 
     $('save').addEventListener('click', async () => {
+      stopLoop();
       saving = true;
       updateSaveState();
       setStatus('Saving… (re-encoding, this can take a while)');
