@@ -41,10 +41,14 @@
 
   <div class="row">
     <button id="setStart">Set StartTime</button>
+    <button class="nudge" data-marker="start" data-delta="-1" disabled>-</button>
+    <button class="nudge" data-marker="start" data-delta="1" disabled>+</button>
     <span>Start: <strong id="startLabel">not set</strong></span>
   </div>
   <div class="row">
     <button id="setEnd">Set EndTime</button>
+    <button class="nudge" data-marker="end" data-delta="-1" disabled>-</button>
+    <button class="nudge" data-marker="end" data-delta="1" disabled>+</button>
     <span>End: <strong id="endLabel">not set</strong></span>
   </div>
   <div class="row">
@@ -111,6 +115,9 @@
       const rangeOk = startFrame !== null && endFrame !== null && endFrame >= startFrame;
       $('save').disabled = saving || !rangeOk || !$('output').value.trim();
       $('loop').disabled = !fps || !rangeOk;
+      document.querySelectorAll('.nudge').forEach((b) => {
+        b.disabled = (b.dataset.marker === 'start' ? startFrame : endFrame) === null;
+      });
       $('loop').textContent = looping ? 'Pause Trimmed Loop' : 'Preview Trimmed Loop';
       if (startFrame !== null && endFrame !== null && endFrame < startFrame) {
         setStatus('End must be at or after Start', true);
@@ -231,6 +238,23 @@
       stopLoop();
       endFrame = currentFrame();
       updateSaveState();
+    });
+    // Move a marker one frame and show that frame
+    document.querySelectorAll('.nudge').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        stopLoop();
+        video.pause();
+        const clamp = (f) => Math.min(lastFrame, Math.max(0, f));
+        const delta = Number(btn.dataset.delta);
+        if (btn.dataset.marker === 'start') {
+          startFrame = clamp(startFrame + delta);
+          seekToFrame(startFrame);
+        } else {
+          endFrame = clamp(endFrame + delta);
+          seekToFrame(endFrame);
+        }
+        updateSaveState();
+      });
     });
     $('output').addEventListener('input', updateSaveState);
 

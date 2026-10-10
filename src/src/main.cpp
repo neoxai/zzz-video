@@ -2,8 +2,15 @@
 #include <Wire.h>
 #include <Arduino_GFX_Library.h>
 
+#include <LittleFS.h>
+
 #include "amoled.h"
 #include "pinconfig.h"
+#include "video_player.h"
+
+// Generated from the source .mp4 by upload.sh into data/
+#define STARTUP_VIDEO "/s-rank.mjpeg"
+#define STARTUP_VIDEO_FPS 30
 
 // TCA9554 registers
 #define TCA9554_REG_OUTPUT 0x01
@@ -52,18 +59,13 @@ void setup() {
   }
   panel->setBrightness(200);
   gfx->fillScreen(BLACK);
-
-  const char *msg = "Hello World";
-  gfx->setTextSize(4);
-  gfx->setTextColor(WHITE);
-  int16_t x1, y1;
-  uint16_t w, h;
-  gfx->getTextBounds(msg, 0, 0, &x1, &y1, &w, &h);
-  gfx->setCursor((gfx->width() - w) / 2, (gfx->height() - h) / 2);
-  gfx->print(msg);
   gfx->flush();
 
-  Serial.println("zzz-video: hello world drawn");
+  if (!LittleFS.begin()) {
+    Serial.println("LittleFS mount failed — run ./upload.sh to flash data/");
+    return;
+  }
+  playMjpeg(STARTUP_VIDEO, gfx, STARTUP_VIDEO_FPS, true /* loop */);
 }
 
 void loop() {

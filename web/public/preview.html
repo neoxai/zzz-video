@@ -10,7 +10,7 @@
     dt { font-weight: bold; }
     dd { margin: 0; }
     button { padding: 0.5rem 1.25rem; font-size: 1rem; cursor: pointer; min-width: 6rem; }
-    video { display: block; max-width: 100%; max-height: 70vh; margin-top: 1rem; background: #000; }
+    video, canvas { display: block; max-width: 100%; max-height: 70vh; margin-top: 1rem; background: #000; }
     .error { color: #b91c1c; }
   </style>
 </head>
@@ -24,10 +24,15 @@
   </dl>
   <div id="error" class="error"></div>
   <button id="toggle">Play</button>
-  <video id="video" preload="metadata" playsinline></video>
+  <video id="video" preload="metadata" playsinline loop></video>
+  <canvas id="mjpeg" hidden></canvas>
 
   <script>
-    const file = new URLSearchParams(location.search).get('file');
+    const params = new URLSearchParams(location.search);
+    const file = params.get('file');
+    // Optional subfolder: final or a screen size such as 368-448
+    const folder = params.get('folder') || '';
+    const label = folder ? `${folder}/${file}` : file;
     const video = document.getElementById('video');
     const toggle = document.getElementById('toggle');
     const errorEl = document.getElementById('error');
@@ -40,16 +45,63 @@
     }
 
     async function loadInfo() {
-      const res = await fetch(`/api/probe?file=${encodeURIComponent(file)}`);
+      const res = await fetch(`/api/probe?file=${encodeURIComponent(file)}&folder=${encodeURIComponent(folder)}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       document.getElementById('width').textContent = `${data.width} px`;
       document.getElementById('height').textContent = `${data.height} px`;
       document.getElementById('duration').textContent = formatDuration(data.duration);
+      return data;
+    }
+
+    // Screen-size exports are raw MJPEG for the ESP32, which <video> can't
+    // play: split it into its JPEG frames and play them on a canvas instead.
+    const isMjpeg = file && file.toLowerCase().endsWith('.mjpeg');
+    const canvas = document.getElementById('mjpeg');
+    const mjpeg = { frames: [], index: 0, timer: null, fps: 30 };
+
+    // Each frame starts with a JPEG SOI marker (FF D8 FF)
+    function splitFrames(bytes) {
+      const starts = [];
+      for (let i = 0; i + 2 < bytes.length; i++) {
+        if (bytes[i] === 0xff && bytes[i + 1] === 0xd8 && bytes[i + 2] === 0xff) starts.push(i);
+      }
+      return starts.map((s, n) => bytes.subarray(s, starts[n + 1] ?? bytes.length));
+    }
+
+    async function loadMjpeg(src) {
+      const res = await fetch(src);
+      if (!res.ok) throw new Error(`Could not load ${label}`);
+      const parts = splitFrames(new Uint8Array(await res.arrayBuffer()));
+      mjpeg.frames = await Promise.all(parts.map((p) =>
+        createImageBitmap(new Blob([p], { type: 'image/jpeg' }))));
+      if (mjpeg.frames.length === 0) throw new Error('No frames found');
+      canvas.width = mjpeg.frames[0].width;
+      canvas.height = mjpeg.frames[0].height;
+      drawFrame();
+    }
+
+    function drawFrame() {
+      canvas.getContext('2d').drawImage(mjpeg.frames[mjpeg.index], 0, 0);
+    }
+
+    function toggleMjpeg() {
+      if (mjpeg.timer) {
+        clearInterval(mjpeg.timer);
+        mjpeg.timer = null;
+        toggle.textContent = 'Play';
+        return;
+      }
+      mjpeg.timer = setInterval(() => {
+        mjpeg.index = (mjpeg.index + 1) % mjpeg.frames.length;
+        drawFrame();
+      }, 1000 / mjpeg.fps);
+      toggle.textContent = 'Pause';
     }
 
     toggle.addEventListener('click', () => {
-      if (video.paused) video.play();
+      if (isMjpeg) toggleMjpeg();
+      else if (video.paused) video.play();
       else video.pause();
     });
     video.addEventListener('play', () => { toggle.textContent = 'Pause'; });
@@ -59,10 +111,22 @@
       errorEl.textContent = 'No file specified';
       toggle.disabled = true;
     } else {
-      document.title = `Preview – ${file}`;
-      document.getElementById('title').textContent = file;
-      video.src = `/video/${encodeURIComponent(file)}`;
-      loadInfo().catch((err) => { errorEl.textContent = err.message; });
+      document.title = `Preview – ${label}`;
+      document.getElementById('title').textContent = label;
+      const src = `/video/${folder ? `${encodeURIComponent(folder)}/` : ''}${encodeURIComponent(file)}`;
+      const info = loadInfo();
+      if (isMjpeg) {
+        video.hidden = true;
+        canvas.hidden = false;
+        toggle.disabled = true;
+        info.then((data) => { mjpeg.fps = data.fps || mjpeg.fps; }).catch(() => {});
+        loadMjpeg(src)
+          .then(() => { toggle.disabled = false; })
+          .catch((err) => { errorEl.textContent = err.message; });
+      } else {
+        video.src = src;
+      }
+      info.catch((err) => { errorEl.textContent = err.message; });
     }
   </script>
 </body>

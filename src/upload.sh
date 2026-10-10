@@ -24,7 +24,16 @@ echo "PlatformIO version: $(pio --version)"
 echo "Venv ready."
 
 set -o pipefail
-pio run --target upload 2>&1 | tee upload.log
+
+# Startup video, as exported by the web app's Finalize (MJPEG, 30fps).
+# data/ is flashed to the internal LittleFS partition.
+VIDEO_SRC="/home/john/Documents/zzzFootage/368-448/s-rank.mjpeg"
+mkdir -p data
+echo "Copying $VIDEO_SRC -> data/s-rank.mjpeg"
+cp "$VIDEO_SRC" data/s-rank.mjpeg
+
+pio run --target uploadfs 2>&1 | tee upload.log
+pio run --target upload 2>&1 | tee -a upload.log
 
 # PlatformIO >= 6.2 refuses to monitor when stdout is a pipe, so run it under
 # `script` to give it a real TTY while still appending to upload.log.

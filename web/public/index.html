@@ -5,43 +5,134 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ZZZ Footage</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
-    ul { list-style: none; padding: 0; border: 1px solid #ccc; border-radius: 6px; }
-    li { padding: 0.5rem 0.75rem; cursor: pointer; border-bottom: 1px solid #eee; }
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+    h2 { margin: 0 0 0.5rem; font-size: 1.2rem; }
+    .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
+    @media (max-width: 700px) { .columns { grid-template-columns: 1fr; } }
+    ul { list-style: none; padding: 0; margin: 0; border: 1px solid #ccc; border-radius: 6px; }
+    li { padding: 0.5rem 0.75rem; border-bottom: 1px solid #eee; overflow-wrap: anywhere; }
     li:last-child { border-bottom: none; }
-    li:hover { background: #f3f3f3; }
-    li.selected { background: #2563eb; color: #fff; }
-    #actions { position: sticky; top: 0; background: #fff; padding: 0.75rem 0; border-bottom: 1px solid #ccc; margin-bottom: 1rem; }
-    #actions p { margin: 0.5rem 0 0; display: flex; gap: 0.5rem; }
+    li.item { cursor: pointer; }
+    li.item:hover { background: #f3f3f3; }
+    li.item.selected { background: #2563eb; color: #fff; }
+    #actions { position: sticky; top: 0; z-index: 1; background: #fff; padding: 0.75rem 0; border-bottom: 1px solid #ccc; margin-bottom: 1rem; }
+    #actions .row { margin: 0.5rem 0 0; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
     button { padding: 0.5rem 1.25rem; font-size: 1rem; cursor: pointer; }
+    input[type="text"] { padding: 0.45rem; font-size: 1rem; min-width: 14rem; }
     #status { margin-top: 0.5rem; color: #555; min-height: 1.2em; }
-    .error { color: #b91c1c; }
+    .error { color: #b91c1c !important; }
+    .final-name { font-weight: 600; }
+    .sizes { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; align-items: center; }
+    .size { font-size: 0.8rem; padding: 0.1rem 0.45rem; border-radius: 999px; border: 1px solid; }
+    .size.ok { color: #166534; border-color: #86efac; background: #f0fdf4; }
+    .size.missing { color: #6b7280; border-color: #d1d5db; border-style: dashed; background: #fff; }
+    .sizes button { padding: 0.15rem 0.6rem; font-size: 0.8rem; }
   </style>
 </head>
 <body>
   <h1>Footage</h1>
   <div id="actions">
     <div>Selected: <strong id="selected">none</strong></div>
-    <p>
-      <button data-action="preview" disabled>Preview</button>
-      <button data-action="trim" disabled>Trim</button>
-      <button data-action="skew" disabled>Skew</button>
-      <button data-action="crop" disabled>Crop</button>
-    </p>
+    <div id="rawActions">
+      <div class="row">
+        <button data-action="preview" disabled>Preview</button>
+        <button data-action="trim" disabled>Trim</button>
+        <button data-action="skew" disabled>Skew</button>
+        <button data-action="crop" disabled>Crop</button>
+      </div>
+      <div class="row">
+        <label for="finalName">Final name:</label>
+        <input id="finalName" type="text" placeholder="same as raw" disabled>
+        <button id="toFinal" disabled>Copy to Final</button>
+      </div>
+    </div>
+    <div id="finalActions" class="row" hidden></div>
     <div id="status"></div>
   </div>
-  <ul id="files"><li>Loading…</li></ul>
+
+  <div class="columns">
+    <section>
+      <h2>Raw</h2>
+      <ul id="files"><li>Loading…</li></ul>
+    </section>
+    <section>
+      <h2>Final</h2>
+      <ul id="finals"><li>Loading…</li></ul>
+    </section>
+  </div>
 
   <script>
     const list = document.getElementById('files');
+    const finalsList = document.getElementById('finals');
     const buttons = document.querySelectorAll('button[data-action]');
     const selectedEl = document.getElementById('selected');
     const statusEl = document.getElementById('status');
-    let selected = null;
+    const finalName = document.getElementById('finalName');
+    const toFinal = document.getElementById('toFinal');
+    const rawActions = document.getElementById('rawActions');
+    const finalActions = document.getElementById('finalActions');
+    // { kind: 'raw' | 'final', name, final? } where final is the /api/finals entry
+    let selection = null;
+    let busy = false;
 
     function setStatus(msg, isError) {
       statusEl.textContent = msg;
       statusEl.className = isError ? 'error' : '';
+    }
+
+    function setBusy(value) {
+      busy = value;
+      toFinal.disabled = busy || selection?.kind !== 'raw';
+      finalsList.querySelectorAll('button').forEach((b) => { b.disabled = busy; });
+    }
+
+    async function post(url, body) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      return data;
+    }
+
+    function preview(file, folder) {
+      location.href = `/preview?file=${encodeURIComponent(file)}&folder=${encodeURIComponent(folder)}`;
+    }
+
+    // Update the highlight in both lists and show the matching actions
+    function select(newSelection) {
+      selection = newSelection;
+      document.querySelectorAll('li.item').forEach((li) => {
+        li.classList.toggle('selected', li.dataset.kind === selection.kind && li.dataset.name === selection.name);
+      });
+
+      if (selection.kind === 'raw') {
+        selectedEl.textContent = selection.name;
+        rawActions.hidden = false;
+        finalActions.hidden = true;
+        buttons.forEach((b) => { b.disabled = false; });
+        finalName.disabled = false;
+        finalName.placeholder = selection.name;
+      } else {
+        selectedEl.textContent = `final/${selection.name}`;
+        rawActions.hidden = true;
+        finalActions.hidden = false;
+        finalActions.innerHTML = '';
+        const add = (label, file, folder) => {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.addEventListener('click', () => preview(file, folder));
+          finalActions.appendChild(btn);
+        };
+        add('Preview final', selection.name, 'final');
+        // Size exports are the ESP32's .mjpeg, named per size by the server
+        for (const s of selection.final.sizes) {
+          if (s.exists) add(`Preview ${s.width}-${s.height}`, s.file, `${s.width}-${s.height}`);
+        }
+      }
+      setBusy(busy);
     }
 
     async function loadFiles() {
@@ -58,27 +149,108 @@
       }
       for (const name of data.files) {
         const li = document.createElement('li');
+        li.className = 'item';
+        li.dataset.kind = 'raw';
+        li.dataset.name = name;
         li.textContent = name;
+        if (selection?.kind === 'raw' && selection.name === name) li.classList.add('selected');
         li.addEventListener('click', () => {
-          list.querySelectorAll('li.selected').forEach((el) => el.classList.remove('selected'));
-          li.classList.add('selected');
-          selected = name;
-          selectedEl.textContent = name;
-          buttons.forEach((b) => { b.disabled = false; });
+          if (selection?.kind !== 'raw' || selection.name !== name) finalName.value = '';
+          select({ kind: 'raw', name });
           setStatus('');
         });
         list.appendChild(li);
       }
     }
 
+    async function loadFinals() {
+      const res = await fetch('/api/finals');
+      const data = await res.json();
+      finalsList.innerHTML = '';
+      if (!res.ok) {
+        finalsList.innerHTML = '<li class="error"></li>';
+        finalsList.firstChild.textContent = data.error;
+        return;
+      }
+      if (data.finals.length === 0) {
+        finalsList.innerHTML = '<li>No final clips yet</li>';
+        return;
+      }
+      for (const final of data.finals) {
+        const li = document.createElement('li');
+        li.className = 'item';
+        li.dataset.kind = 'final';
+        li.dataset.name = final.name;
+        li.addEventListener('click', () => {
+          select({ kind: 'final', name: final.name, final });
+          setStatus('');
+        });
+
+        const name = document.createElement('div');
+        name.className = 'final-name';
+        name.textContent = final.name;
+        const sizes = document.createElement('div');
+        sizes.className = 'sizes';
+        for (const s of final.sizes) {
+          const badge = document.createElement('span');
+          badge.className = `size ${s.exists ? 'ok' : 'missing'}`;
+          badge.textContent = `${s.width}-${s.height}`;
+          badge.title = s.exists ? 'Exported' : 'Not exported yet';
+          sizes.appendChild(badge);
+        }
+        if (final.sizes.some((s) => !s.exists)) {
+          const btn = document.createElement('button');
+          btn.textContent = 'Make missing sizes';
+          btn.disabled = busy;
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            run(`Making sizes for ${final.name}…`, () => post('/api/final/sizes', { name: final.name }));
+          });
+          sizes.appendChild(btn);
+        }
+        li.append(name, sizes);
+        finalsList.appendChild(li);
+
+        // Keep a selected final's preview buttons in step with its sizes
+        if (selection?.kind === 'final' && selection.name === final.name) {
+          select({ kind: 'final', name: final.name, final });
+        }
+      }
+    }
+
+    // Run a long server task, then refresh both lists
+    async function run(message, task) {
+      setBusy(true);
+      setStatus(message);
+      try {
+        const data = await task();
+        setStatus(data.message);
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        setBusy(false);
+        await Promise.all([loadFiles(), loadFinals()]).catch((err) => setStatus(err.message, true));
+      }
+    }
+
     buttons.forEach((btn) => {
       btn.addEventListener('click', () => {
-        if (!selected) return;
-        location.href = `/${btn.dataset.action}?file=${encodeURIComponent(selected)}`;
+        if (selection?.kind !== 'raw') return;
+        if (btn.dataset.action === 'preview') return preview(selection.name, '');
+        location.href = `/${btn.dataset.action}?file=${encodeURIComponent(selection.name)}`;
       });
     });
 
+    toFinal.addEventListener('click', () => {
+      if (selection?.kind !== 'raw') return;
+      const raw = selection.name;
+      const name = finalName.value.trim() || raw;
+      run(`Copying ${raw} to final/${name} and making screen sizes…`,
+        () => post('/api/final', { file: raw, name }));
+    });
+
     loadFiles().catch((err) => setStatus(err.message, true));
+    loadFinals().catch((err) => setStatus(err.message, true));
   </script>
 </body>
 </html>

@@ -2,3 +2,4 @@
 .pio/
 upload.log
 node_modules/
+src/data/
