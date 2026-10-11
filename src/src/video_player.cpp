@@ -24,6 +24,7 @@ struct Player {
   std::vector<Frame> frames;
   Arduino_Canvas **buffers;
   bool loop;
+  volatile bool stop;        // set by the flusher to end playback early
   QueueHandle_t freeSlots;   // canvases the decoder may draw into
   QueueHandle_t readySlots;  // decoded canvases waiting to be flushed
 };
@@ -68,6 +69,7 @@ static void decodeTask(void *arg) {
   for (;;) {
     Ready r = {0, index, 0};
     xQueueReceive(p->freeSlots, &r.slot, portMAX_DELAY);
+    if (p->stop) break;
 
     uint32_t t = micros();
     const Frame &f = p->frames[index];
@@ -94,7 +96,8 @@ static void decodeTask(void *arg) {
   vTaskDelete(nullptr);
 }
 
-bool playMjpeg(const char *path, Arduino_Canvas *buffers[2], uint8_t fps, bool loop) {
+bool playMjpeg(const char *path, Arduino_Canvas *buffers[2], uint8_t fps, bool loop,
+               FrameHook onFrame) {
   size_t size;
   uint8_t *buf = loadFile(path, &size);
   if (!buf) {
@@ -106,6 +109,7 @@ bool playMjpeg(const char *path, Arduino_Canvas *buffers[2], uint8_t fps, bool l
   p.frames = splitFrames(buf, size);
   p.buffers = buffers;
   p.loop = loop;
+  p.stop = false;
   if (p.frames.empty()) {
     Serial.printf("video: no frames in %s\n", path);
     free(buf);
@@ -124,6 +128,12 @@ bool playMjpeg(const char *path, Arduino_Canvas *buffers[2], uint8_t fps, bool l
     Ready r;
     xQueueReceive(p.readySlots, &r, portMAX_DELAY);
     if (r.slot == FRAME_END) break;
+    if (p.stop) {
+      // Stopping: discard frames still in flight, handing their canvases
+      // back so the decoder wakes, sees `stop`, and sends FRAME_END.
+      xQueueSend(p.freeSlots, &r.slot, portMAX_DELAY);
+      continue;
+    }
 
     // Show frames on a steady clock. If we've fallen more than a frame
     // behind, resync rather than bursting to catch up (that reads as jitter).
@@ -149,6 +159,8 @@ bool playMjpeg(const char *path, Arduino_Canvas *buffers[2], uint8_t fps, bool l
       passStart = millis();
       decodeUs = flushUs = shown = 0;
     }
+
+    if (onFrame && onFrame()) p.stop = true;
   }
 
   vQueueDelete(p.freeSlots);
