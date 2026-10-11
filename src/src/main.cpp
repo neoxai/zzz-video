@@ -10,7 +10,8 @@
 
 // Generated from the source .mp4 by upload.sh into data/
 #define STARTUP_VIDEO "/s-rank.mjpeg"
-#define STARTUP_VIDEO_FPS 30
+// Must match ESP_FPS in web/server.js (the rate clips are exported at)
+#define STARTUP_VIDEO_FPS 15
 
 // TCA9554 registers
 #define TCA9554_REG_OUTPUT 0x01

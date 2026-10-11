@@ -40,9 +40,11 @@ function parseRate(rate) {
 
 // Screen-size exports are MJPEG for the ESP32 player (src/src/video_player.cpp):
 // concatenated JPEG frames with no audio and no timing, played back at a fixed
-// rate. ESP_FPS must match STARTUP_VIDEO_FPS in the firmware.
+// rate. ESP_FPS must match STARTUP_VIDEO_FPS in the firmware, and stay below
+// what the device sustains (~17fps at 448x368) or clips play in slow motion.
+// 15 is an even divisor of 30/60fps sources, so frames are dropped evenly.
 const ESP_EXT = '.mjpeg';
-const ESP_FPS = 30;
+const ESP_FPS = 15;
 const espName = (name) => path.basename(name, path.extname(name)) + ESP_EXT;
 
 // Each MJPEG frame starts with a JPEG SOI marker (FF D8 FF); 0xFF bytes in
