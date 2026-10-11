@@ -4,12 +4,17 @@
 
 #include "pinconfig.h"
 
-// FocalTech register map: 0x02 finger count, then X1 high/low, Y1 high/low
-#define FT_REG_FINGERS 0x02
-#define FT_REG_CHIP_ID 0xA0
+// Shared register map: 0x02 finger count, then X1 high/low, Y1 high/low
+#define REG_FINGERS 0x02
+#ifdef AMOLED_V1
+#define REG_CHIP_ID 0xA0  // FT3168
+#else
+#define REG_CHIP_ID 0xA7          // CST816
+#define CST816_REG_NO_SLEEP 0xFE  // non-zero disables auto-sleep
+#endif
 
 #define POLL_MS 15
-#define SWIPE_MIN_PX 60  // horizontal travel needed to count as a swipe
+#define SWIPE_MIN_PX 60  // travel needed to count as a swipe
 
 static uint8_t rotation;
 static volatile Swipe pending = SWIPE_NONE;
@@ -26,7 +31,7 @@ static bool readRegs(uint8_t reg, uint8_t *buf, uint8_t len) {
 // Reads the first touch point in panel coordinates. Returns false if no finger.
 static bool readPoint(int16_t *x, int16_t *y) {
   uint8_t b[5];
-  if (!readRegs(FT_REG_FINGERS, b, sizeof(b)) || (b[0] & 0x0F) == 0) return false;
+  if (!readRegs(REG_FINGERS, b, sizeof(b)) || (b[0] & 0x0F) == 0) return false;
   *x = ((b[1] & 0x0F) << 8) | b[2];
   *y = ((b[3] & 0x0F) << 8) | b[4];
   return true;
@@ -57,13 +62,17 @@ static void touchTask(void *) {
       lastX = x;
       lastY = y;
     } else if (down) {
-      // Finger lifted: a mostly-horizontal drag far enough is a swipe
+      // Finger lifted: a drag far enough along its dominant axis is a swipe.
+      // Up counts as left and down as right.
       down = false;
       int16_t dx, dy;
       toScreen(lastX - startX, lastY - startY, &dx, &dy);
-      if (abs(dx) >= SWIPE_MIN_PX && abs(dx) > 2 * abs(dy)) {
-        pending = dx < 0 ? SWIPE_LEFT : SWIPE_RIGHT;
-      }
+      int16_t travel = abs(dx) >= abs(dy) ? dx : dy;
+      bool swiped = abs(travel) >= SWIPE_MIN_PX;
+      if (swiped) pending = travel < 0 ? SWIPE_LEFT : SWIPE_RIGHT;
+      const char *dir = abs(dx) >= abs(dy) ? (dx < 0 ? "left" : "right") : (dy < 0 ? "up" : "down");
+      Serial.printf("touch: dx=%d dy=%d -> %s%s\n", dx, dy, swiped ? "swipe " : "no swipe",
+                    swiped ? dir : "");
     }
     vTaskDelay(pdMS_TO_TICKS(POLL_MS));
   }
@@ -72,10 +81,17 @@ static void touchTask(void *) {
 bool touchBegin(uint8_t r) {
   rotation = r;
   uint8_t id;
-  if (!readRegs(FT_REG_CHIP_ID, &id, 1)) return false;
-  Serial.printf("touch: FT3x68 chip id 0x%02X\n", id);
+  bool found = readRegs(REG_CHIP_ID, &id, 1);
+  if (found) Serial.printf("touch: chip id 0x%02X at 0x%02X\n", id, TOUCH_ADDR);
+#ifdef CST816_REG_NO_SLEEP
+  // The CST816 drops off the bus in auto-sleep until touched; keep it awake
+  Wire.beginTransmission(TOUCH_ADDR);
+  Wire.write(CST816_REG_NO_SLEEP);
+  Wire.write(0x01);
+  Wire.endTransmission();
+#endif
   xTaskCreatePinnedToCore(touchTask, "touch", 4096, nullptr, 1, nullptr, 1);
-  return true;
+  return found;
 }
 
 Swipe takeSwipe() {

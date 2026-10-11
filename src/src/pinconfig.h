@@ -16,8 +16,13 @@
 #define IIC_SDA 15
 #define IIC_SCL 14
 
-// FT3168 capacitive touch controller
-#define TOUCH_ADDR 0x38
+// Capacitive touch controller — differs by board revision (see amoled.h).
+// Both share the FocalTech-style point registers (0x02..0x06).
+#ifdef AMOLED_V1
+#define TOUCH_ADDR 0x38  // FT3168
+#else
+#define TOUCH_ADDR 0x15  // CST816
+#endif
 
 // TCA9554 IO expander — P0..P2 drive the display/touch power and reset lines
 #define TCA9554_ADDR 0x20

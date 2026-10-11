@@ -131,7 +131,7 @@ void setup() {
   playMjpeg(videos[0].c_str(), buffers, VIDEO_FPS, true /* loop */);
 #else
   if (!touchBegin(DISPLAY_ROTATION)) {
-    Serial.println("Touch controller not responding at 0x38 — swiping disabled");
+    Serial.printf("touch: no answer at 0x%02X yet — polling anyway\n", TOUCH_ADDR);
   }
   size_t current = 0;
   for (;;) {
